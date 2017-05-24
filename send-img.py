@@ -8,18 +8,42 @@ from datetime import datetime
 import time
 import subprocess
 import shlex
+import logging
+import glob
 
-IDLE    = 'the parser is idle'
-SUBJECT = 'hitted subject'
-BEGIN   = 'beginning-of-request'
 
-IMG_FORMAT = 'jpg'
-RQ_TAKE = 'take'
-ARG_NUM = 'number'
+_currDir = os.path.dirname( os.path.abspath( __file__ ) )
+
+# setup logger
+logging.basicConfig(level    = logging.DEBUG,
+                    format   = '%(asctime)s %(name)s %(levelname)s %(message)s',
+                    datefmt  = '%m-%d %H:%M',
+                    filename = path.join(_currDir, "_send-emil.log"),
+                    filemode ='w')
+
+console = logging.StreamHandler()
+console.setLevel(logging.INFO)
+formatter = logging.Formatter('%(name)s: %(levelname)s %(message)s')
+console.setFormatter(formatter)
+logging.getLogger('').addHandler(console)
+
+logging.info( "current directory: {}".format( _currDir ) )
+
+# settings
+REQUEST_IDENTIFIER = '[request@me]'
+IDLE               = 'the parser is idle'
+SUBJECT            = 'hitted subject'
+BEGIN              = 'beginning-of-request'
+IMG_FORMAT         = 'jpg'
+RQ_TAKE_PICTURE    = 'take-picture'
+ARG_NUM            = 'number'
+MAIL_DIR           = '/home/meretciel/mail/new'
+IMG_DIR            = '/home/meretciel/workspace/camera'
+RECEIVERS          = [ 'meretciel.fr@gmail.com' ]
 
 
 class EmailMessage( object ):
-    _COMMAND_TEMPLATE_PLAIN = r'mail -v -s "{subject}" {receiver}'
+    _COMMAND_TEMPLATE_PLAIN      = r'mail -v -s "{subject}" {receiver}'
     _COMMAND_TEMPLATE_ATTACHMENT = r'mail -v -s "{subject}" {attachment} {receiver}'
 
     def __init__( self, subject = None, message = None, receiver = None, attachment = None ):
@@ -39,17 +63,18 @@ class EmailMessage( object ):
             
 
         if isinstance( self._attachment, list):
-            attachment = '-a '.join( self._attachment )
-            attachment = '-a ' + attachment
+            attachment = ' -a '.join( self._attachment )
+            attachment = ' -a ' + attachment
 
         else:
-            attachment = '-a ' + self._attachment
+            attachment = ' -a ' + self._attachment
         
 
         return EmailMessage._COMMAND_TEMPLATE_ATTACHMENT.format( message = self._message, subject = self._subject, receiver = receiver, attachment = attachment )
 
     
     def send( self ):
+        ''' send email using mail command. We can also implement this in plain python '''
         p1 = subprocess.Popen( 
             shlex.split( r'echo {message}'.format( message = self._message ) ),
             stdout = subprocess.PIPE,
@@ -65,7 +90,7 @@ def constructCommand( s_command ):
     return l 
 
 def executeCommand( s_command ):
-    print( "=> execute command: {}".format( s_command ) )
+    logging.info( "execute command: {}".format( s_command ) )
     subprocess.call( constructCommand( s_command ) )
 
 def getEmail():
@@ -75,8 +100,10 @@ def getEmail():
 
 
 def checkNewEmail():
+    ''' check if there is new ( unread ) emails. '''
     ls_output = subprocess.check_output( constructCommand( "ls -lt {}".format( MAIL_DIR ) ) )
     ls_output = str( ls_output, "utf-8" )
+    logging.debug( "ls_output: {}".format( ls_output ) )
     ls_output = ls_output.split('\n')
     ls_output = ls_output[1:]   # the first line is total output
     newFiles  = [ x.split(' ')[-1] for x in ls_output ][::-1]
@@ -84,27 +111,33 @@ def checkNewEmail():
 
     return newFiles
 
-RQ_TAKE = 'take'
 
 
 def takePicture( number ):
-    time = datetime.utcnow()
-    baseFileName = hashlib.sha224( str( time ).encode( "utf-8" ) ).hexdigest()
-    commandTemplate = r'/opt/vc/bin/raspistill -n -vf -w 640 -h 480 -e {IMG_FORMAT} -o {_}'.format( IMG_FORMAT = IMG_FORMAT, _ = '{}' )
-    imgFileNames = []
+    ''' ask raspiberry pi to take picture. '''
+    time            = datetime.utcnow()
+    baseFileName    = path.join( IMG_DIR, hashlib.sha224( str( time ).encode( "utf-8" ) ).hexdigest() )
+    commandTemplate = r'/opt/vc/bin/raspistill -n -vf -w 640 -h 480 -e {IMG_FORMAT} {_} -o {baseFileName}%04d.{IMG_FORMAT}'.format( IMG_FORMAT = IMG_FORMAT, baseFileName = baseFileName, _ = "{time}")
+    number          = min( 10, int( number ) )
+    number          = max( number, 1 ) 
 
-    number = min( 10, int( number ) )
-    for i in range( number ):
-        try:
-            print( '=> taking picture ' )
-            imgFileName = path.join( IMG_DIR, baseFileName + str( i ) + '.' + IMG_FORMAT )
-            command = commandTemplate.format( imgFileName )
-            executeCommand( command )
-            imgFileNames.append( imgFileName )
-        except Exception as e:
-            print( "=> Error when taking picture" )
+    if number == 1:
+        command = commandTemplate.format( time = '' )
+        imgFileNames = [ "{baseFileName}-001.{IMG_FORMAT}".format( baseFileName = baseFileName, IMG_FORMAT = IMG_FORMAT ) ]
+    else:
+        _tl           = 2000    # in milliseconds
+        _totalTime    = _tl * ( number - 1)
+        _time         = "-t {} -tl {}".format( _totalTime, _tl )
+        command       = commandTemplate.format( time = _time )
 
-    return imgFileNames
+        imgFileNames = ["{baseFileName}{num}.{IMG_FORMAT}".format( baseFileName = baseFileName, num=str(i).zfill(4), IMG_FORMAT=IMG_FORMAT ) for i in range(number)]
+
+    try:
+        executeCommand( command )
+        return imgFileNames
+    except Exception as e:
+       logging.error("Error when taking picture") 
+       return []
 
 
 class Request( object ):
@@ -122,19 +155,17 @@ class Request( object ):
 
     def process( self ):
         if self._requestName:
-            print( '=> processing {}'.format( self ) )
+            logging.info( 'processing {}'.format( self ) )
 
-            if self._requestName.lower() == RQ_TAKE:
+            if self._requestName.lower() == RQ_TAKE_PICTURE:
                 number = self._args.get( ARG_NUM, 1 )
                 imgFiles = takePicture( number )
-                print( '<2> image files : {}'.format( imgFiles ) )
+                logging.debug( '<2> image files : {}'.format( imgFiles ) )
                 newEmail = EmailMessage( subject = 'New Images', message = '', receiver = RECEIVERS, attachment = imgFiles )
                 newEmail.send()
                 for fn in imgFiles:
-                    print( "removing the file: {}".format( fn ) )
+                    logging.info( "removing the file: {}".format( fn ) )
                     os.remove( fn )
-
-             
 
 
     def __repr__( self ):
@@ -144,7 +175,7 @@ def _parseEmail( f, state, requests ):
     if state == IDLE:
         line = f.readline()
         while line:
-            if 'Subject' in line and '[request-to-meretciel]' in line:
+            if 'Subject' in line and REQUEST_IDENTIFIER in line:
                 state = SUBJECT
                 break
             line = f.readline()
@@ -160,7 +191,7 @@ def _parseEmail( f, state, requests ):
         return line, f, state, requests
 
     if state == BEGIN:
-        pattern = r'(?P<attrName>\w+)\s*=\s*(?P<value>\w+)'
+        pattern = r'(?P<attrName>\w+)\s*=\s*(?P<value>.+)'
         line = f.readline()
         request = Request()
         while line:
@@ -183,13 +214,13 @@ def _parseEmail( f, state, requests ):
 
 
 def parseEmail( msgFile ):
-    print("parsing email file {}".format( msgFile ) )
+    logging.info("parsing email file {}".format( msgFile ) )
     with open( msgFile ) as f:
         state = IDLE
         line = '__start__'
         requests = []
         while line:
-            print( "=> processing line : {}".format( line ) )
+            logging.info( "processing line : {}".format( line ) )
             line, f, state, request = _parseEmail( f, state, requests )
 
         return requests
@@ -203,27 +234,26 @@ def removeNewMsgFiles( newMsgFiles ):
 def getNewRequestFromEmail():
     getEmail()
     newMsgFiles = checkNewEmail()
-    print(" <1> New messages : {}".format( str( newMsgFiles ) ) ) 
+    logging.debug(" <1> New messages : {}".format( str( newMsgFiles ) ) ) 
     requests = []
     for newMsgFile in newMsgFiles:
         requests.extend( parseEmail( newMsgFile ) )
-        removeNewMsgFiles( newMsgFiles )
+    removeNewMsgFiles( newMsgFiles )
     return requests
 
 
-
-MAIL_DIR = '/home/meretciel/mail/new'
-IMG_DIR  = '/home/meretciel/workspace/camera'
-RECEIVERS = [ 'meretciel.fr@gmail.com' ]
-
 if __name__ == '__main__':
+    
+    existingFiles = glob.glob( path.join( MAIL_DIR, r'*.alarmpi' ) )
+    for f in existingFiles:
+        os.remove( f )
 
     while True:
-        print( "waiting for request." )
+        logging.info( "waiting for request." )
         requests = getNewRequestFromEmail()
         for request in requests:
             request.process()
 
-        time.sleep( 6. )
+        time.sleep( 10. )
 
 
